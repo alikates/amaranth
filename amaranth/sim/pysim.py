@@ -196,12 +196,6 @@ class _VCDWriter:
                 else:
                     row_vcd_vars.append(add_wire_var(memory_scope, row_name, row))
 
-                if var_size > 1:
-                        suffix = f"[{var_size - 1}:0]"
-                    else:
-                        suffix = ""
-                row_gtkw_names.append(".".join((*memory_scope, row_name)) + suffix)
-
                 vcd_vars.append(row_vcd_vars)
                 gtkw_names.append(row_gtkw_names)
 
