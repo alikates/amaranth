@@ -114,120 +114,93 @@ class _VCDWriter:
         if self.vcd_writer is None:
             return
 
+        # recursive add vars
+        def add_var(scope, var_name, var_type, var_size, var_init, value):
+            vcd_var = None
+            # if isinstance(var_name, int):
+            #     var_name = f"[{var_name}]"
+            var_name = f"{var_name}"
+            if re.search(r"[ \t\r\n]", var_name):
+                raise NameError("Signal '{}.{}' contains a whitespace character"
+                                .format(".".join(scope), var_name))
+
+            if vcd_var is None:
+                vcd_var = self.vcd_writer.register_var(
+                    scope=scope, name=var_name,
+                    var_type=var_type, size=var_size, init=var_init)
+                if var_size > 1:
+                    suffix = f"[{var_size - 1}:0]"
+                else:
+                    suffix = ""
+                self.gtkw_signal_names[signal].append(
+                    ".".join((*scope, var_name)) + suffix)
+            else:
+                self.vcd_writer.register_alias(
+                    scope=scope, name=var_name,
+                    var=vcd_var)
+
+            return (vcd_var, value)
+
+        def add_wire_var(scope, name, value):
+            return add_var(scope, name, "wire", len(value), eval_value(self.state, value), value)
+
+        def add_format_var(scope, name, fmt):
+            return add_var(scope, name, "string", 1, eval_format(self.state, fmt), fmt)
+
+        def add_format(scope, name, fmt):
+            vars = []
+            if isinstance(fmt, Format.Struct):
+                vars.append(add_wire_var(scope, f"\\{name}", fmt._value)) # flattened value
+                self.vcd_writer.set_scope_type((*scope, name,), "vhdl_record")
+                for subname, subfmt in fmt._fields.items():
+                    vars.extend(add_format((*scope, name,), subname, subfmt))
+            elif isinstance(fmt, Format.Array):
+                vars.append(add_wire_var(scope, f"\\{name}", fmt._value)) # flattened value
+                self.vcd_writer.set_scope_type((*scope, name,), "vhdl_record")
+                for idx, subfmt in enumerate(fmt._fields):
+                    vars.extend(add_format((*scope, name,), idx, subfmt))
+            elif (isinstance(fmt, Format) and
+                    len(fmt._chunks) == 1 and
+                    isinstance(fmt._chunks[0], tuple) and
+                    fmt._chunks[0][1] == ""):
+                vars.append(add_wire_var(scope, name, fmt._chunks[0][0]))
+            else:
+                vars.append(add_format_var(scope, name, fmt))
+            return vars
+
         for signal, names in itertools.chain(signal_names.items(), trace_names.items()):
             self.vcd_signal_vars[signal] = []
             self.gtkw_signal_names[signal] = []
 
-            def add_var(scope, var_name, var_type, var_size, var_init, value):
-                vcd_var = None
-                if isinstance(var_name, int):
-                    var_name = str(var_name)
-                if re.search(r"[ \t\r\n]", var_name):
-                    raise NameError("Signal '{}.{}' contains a whitespace character"
-                                    .format(".".join(scope), var_name))
-
-                if vcd_var is None:
-                    vcd_var = self.vcd_writer.register_var(
-                        scope=scope, name=var_name,
-                        var_type=var_type, size=var_size, init=var_init)
-                    if var_size > 1:
-                        suffix = f"[{var_size - 1}:0]"
-                    else:
-                        suffix = ""
-                    self.gtkw_signal_names[signal].append(
-                        ".".join((*var_scope, var_name)) + suffix)
-                else:
-                    self.vcd_writer.register_alias(
-                        scope=scope, name=var_name,
-                        var=vcd_var)
-
-                self.vcd_signal_vars[signal].append((vcd_var, value))
-
-            def add_wire_var(path, name, value):
-                add_var(path, name, "wire", len(value), eval_value(self.state, value), value)
-
-            def add_format_var(path, name, fmt):
-                add_var(path, name, "string", 1, eval_format(self.state, fmt), fmt)
-
-            def add_format(path, name, fmt):
-                if isinstance(fmt, Format.Struct):
-                    add_wire_var(path, "\\" + name, fmt._value) # flattened value
-                    self.vcd_writer.set_scope_type((*path, name,), "vhdl_record")
-                    for subname, subfmt in fmt._fields.items():
-                        add_format((*path, name,), subname, subfmt)
-                elif isinstance(fmt, Format.Array):
-                    add_wire_var(path, "\\" + name, fmt._value) # flattened value
-                    self.vcd_writer.set_scope_type((*path, name,), "vhdl_array")
-                    for idx, subfmt in enumerate(fmt._fields):
-                        add_format((*path, name,), idx, subfmt)
-                elif (isinstance(fmt, Format) and
-                        len(fmt._chunks) == 1 and
-                        isinstance(fmt._chunks[0], tuple) and
-                        fmt._chunks[0][1] == ""):
-                    add_wire_var(path, name, fmt._chunks[0][0])
-                else:
-                    add_format_var(path, name, fmt)
-
-            for (*var_scope, var_name) in names:
+            for (*scope, var_name) in names:
                 if signal._decoder is not None and not isinstance(signal._decoder, py_enum.EnumMeta):
-                    add_var(var_scope, var_name, "string", 1, signal._decoder(signal._init), signal._decoder)
+                    self.vcd_signal_vars[signal].extend(add_var(scope, var_name, "string", 1, signal._decoder(signal._init), signal._decoder))
                 else:
-                    add_format(var_scope, var_name, signal._format)
+                    self.vcd_signal_vars[signal].extend(add_format(scope, var_name, signal._format))
 
         for memory, memory_name in memories.items():
             self.vcd_memory_vars[memory] = vcd_vars = []
             self.gtkw_memory_names[memory] = gtkw_names = []
 
+            memory_scope = memory_name[:-1]
+            memory_name = "\\" + memory_name[-1]
+
             for idx, row in enumerate(memory):
                 row_vcd_vars = []
                 row_gtkw_names = []
-                var_scope = memory_name[:-1]
-
-                def add_mem_var(path, var_type, var_size, var_init, value):
-                    field_name = "\\" + memory_name[-1] + f"[{idx}]"
-                    for item in path:
-                        if isinstance(item, int):
-                            field_name += f"[{item}]"
-                        else:
-                            field_name += f".{item}"
-                    row_vcd_vars.append((self.vcd_writer.register_var(
-                        scope=var_scope, name=field_name, var_type=var_type,
-                        size=var_size, init=var_init
-                    ), value))
-                    if var_size > 1:
-                        suffix = f"[{var_size - 1}:0]"
-                    else:
-                        suffix = ""
-                    row_gtkw_names.append(".".join((*var_scope, field_name)) + suffix)
-
-                def add_mem_wire_var(path, value):
-                    add_mem_var(path, "wire", len(value), eval_value(self.state, value), value)
-
-                def add_mem_format_var(path, fmt):
-                    add_mem_var(path, "string", 1, eval_format(self.state, fmt), fmt)
-
-                def add_mem_format(path, fmt):
-                    if isinstance(fmt, Format.Struct):
-                        add_mem_wire_var(path, fmt._value)
-                        for name, subfmt in fmt._fields.items():
-                            add_mem_format(path + (name,), subfmt)
-                    elif isinstance(fmt, Format.Array):
-                        add_mem_wire_var(path, fmt._value)
-                        for idx, subfmt in enumerate(fmt._fields):
-                            add_mem_format(path + (idx,), subfmt)
-                    elif (isinstance(fmt, Format) and
-                            len(fmt._chunks) == 1 and
-                            isinstance(fmt._chunks[0], tuple) and
-                            fmt._chunks[0][1] == ""):
-                        add_mem_wire_var(path, fmt._chunks[0][0])
-                    else:
-                        add_mem_format_var(path, fmt)
+                row_name = f"{memory_name}[{idx}]"
 
                 if isinstance(memory._shape, ShapeCastable):
                     fmt = memory._shape.format(memory._shape(row), "")
-                    add_mem_format((), fmt)
+                    row_vcd_vars.extend(add_format(memory_scope, row_name, fmt))
                 else:
-                    add_mem_wire_var((), row)
+                    row_vcd_vars.append(add_wire_var(memory_scope, row_name, row))
+
+                if var_size > 1:
+                        suffix = f"[{var_size - 1}:0]"
+                    else:
+                        suffix = ""
+                row_gtkw_names.append(".".join((*memory_scope, row_name)) + suffix)
 
                 vcd_vars.append(row_vcd_vars)
                 gtkw_names.append(row_gtkw_names)
